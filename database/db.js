@@ -180,13 +180,13 @@ async function seedData() {
     );
   }
 
-  const hashed = await bcrypt.hash('Admin@1234', 10);
+  const hashed = await bcrypt.hash('MMO@1993#', 10);
   await pool.execute(
     'INSERT INTO users (name, email, password, is_admin) VALUES (?, ?, ?, 1)',
-    ['Admin', 'admin@agency.com', hashed]
+    ['Admin', 'dhruv@monkmediaone.com', hashed]
   );
 
-  console.log('✅ Seed data inserted — Admin: admin@agency.com / Admin@1234');
+  console.log('✅ Seed data inserted — Admin: dhruv@monkmediaone.com / MMO@1993#');
 }
 
 module.exports = { getDb, initDatabase };

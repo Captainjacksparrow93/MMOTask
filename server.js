@@ -44,7 +44,7 @@ async function connectDb(attempt = 1) {
   try {
     await initDatabase();
     console.log('✅ Database connected and ready');
-    console.log('📧 Default Admin → admin@agency.com / Admin@1234');
+    console.log('📧 Default Admin → dhruv@monkmediaone.com / MMO@1993#');
   } catch (err) {
     console.error(`❌ DB connection attempt ${attempt} failed:`, err.message);
     if (attempt < MAX_RETRIES) {
