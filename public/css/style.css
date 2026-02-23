@@ -451,7 +451,7 @@ input, select, textarea { font-family: inherit; font-size: inherit; }
   line-height: 1;
 }
 .input-wrap input {
-  padding-left: 36px;
+  padding: 9px 12px 9px 38px !important;
   position: relative;
 }
 
