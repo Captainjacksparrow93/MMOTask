@@ -10,6 +10,8 @@ const app = express();
 
 // ── Startup diagnostic — confirms which DB vars are loaded ────────────────────
 console.log('\n── Env check ──────────────────────────────────────');
+console.log('  App folder   :', __dirname);
+console.log('  .env path    :', path.resolve(__dirname, '.env'));
 console.log('  .env loaded  :', dotenvResult.error ? '❌ NOT FOUND — ' + dotenvResult.error.message : '✅ OK');
 console.log('  DB_HOST      :', process.env.DB_HOST      || '(not set — will default to localhost)');
 console.log('  DB_PORT      :', process.env.DB_PORT      || '(not set — will default to 3306)');
