@@ -1,9 +1,23 @@
-require('dotenv').config();
+const path = require('path');
+
+// ── Load .env from the same folder as server.js (fixes Hostinger cwd issues) ─
+const dotenvResult = require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+
 const express = require('express');
 const cors    = require('cors');
-const path    = require('path');
 
 const app = express();
+
+// ── Startup diagnostic — confirms which DB vars are loaded ────────────────────
+console.log('\n── Env check ──────────────────────────────────────');
+console.log('  .env loaded  :', dotenvResult.error ? '❌ NOT FOUND — ' + dotenvResult.error.message : '✅ OK');
+console.log('  DB_HOST      :', process.env.DB_HOST      || '(not set — will default to localhost)');
+console.log('  DB_PORT      :', process.env.DB_PORT      || '(not set — will default to 3306)');
+console.log('  DB_USER      :', process.env.DB_USER      || '(not set — will default to root)');
+console.log('  DB_PASSWORD  :', process.env.DB_PASSWORD  ? '(set ✅)' : '(not set ❌)');
+console.log('  DB_NAME      :', process.env.DB_NAME      || '(not set — will default to agency_tasks)');
+console.log('  JWT_SECRET   :', process.env.JWT_SECRET   ? '(set ✅)' : '(not set ❌)');
+console.log('───────────────────────────────────────────────────\n');
 
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(cors());
@@ -31,13 +45,13 @@ app.get('*', (_req, res) => {
 // ── Start HTTP server FIRST so the process stays alive ───────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`\n🚀 Server listening on port ${PORT}`);
+  console.log(`🚀 Server listening on port ${PORT}`);
   connectDb();
 });
 
 // ── Connect to DB with auto-retry ─────────────────────────────────────────────
 const { initDatabase } = require('./database/db');
-const RETRY_DELAY_MS   = 5000;   // wait 5 s between retries
+const RETRY_DELAY_MS   = 5000;
 const MAX_RETRIES      = 10;
 
 async function connectDb(attempt = 1) {
@@ -51,7 +65,7 @@ async function connectDb(attempt = 1) {
       console.log(`🔄 Retrying in ${RETRY_DELAY_MS / 1000}s… (${attempt}/${MAX_RETRIES})`);
       setTimeout(() => connectDb(attempt + 1), RETRY_DELAY_MS);
     } else {
-      console.error('💀 Could not connect to the database after', MAX_RETRIES, 'attempts. Check DB env vars in Hostinger hPanel.');
+      console.error('💀 Could not connect after', MAX_RETRIES, 'attempts. Check your .env file and DB credentials in Hostinger hPanel.');
     }
   }
 }
