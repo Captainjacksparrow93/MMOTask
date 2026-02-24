@@ -19,13 +19,26 @@ console.log('  DB_NAME      :', process.env.DB_NAME      || '(not set — will d
 console.log('  JWT_SECRET   :', process.env.JWT_SECRET   ? '(set ✅)' : '(not set ❌)');
 console.log('───────────────────────────────────────────────────\n');
 
+// ── DB readiness flag ─────────────────────────────────────────────────────────
+let dbReady = false;
+
 // ── Middleware ────────────────────────────────────────────────────────────────
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ── Health-check (Hostinger pings this to verify the process is alive) ────────
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+// ── Health-check ──────────────────────────────────────────────────────────────
+app.get('/health', (_req, res) => res.json({ status: 'ok', db: dbReady }));
+
+// ── DB-ready guard — all /api routes return 503 JSON until DB is connected ────
+app.use('/api', (req, res, next) => {
+  if (!dbReady) {
+    return res.status(503).json({
+      error: 'Server is starting up — database not connected yet. Please wait a moment and try again.',
+    });
+  }
+  next();
+});
 
 // ── API Routes ────────────────────────────────────────────────────────────────
 app.use('/api/auth',        require('./routes/auth'));
@@ -57,6 +70,7 @@ const MAX_RETRIES      = 10;
 async function connectDb(attempt = 1) {
   try {
     await initDatabase();
+    dbReady = true;
     console.log('✅ Database connected and ready');
     console.log('📧 Default Admin → dhruv@monkmediaone.com / MMO@1993#');
   } catch (err) {
@@ -65,7 +79,8 @@ async function connectDb(attempt = 1) {
       console.log(`🔄 Retrying in ${RETRY_DELAY_MS / 1000}s… (${attempt}/${MAX_RETRIES})`);
       setTimeout(() => connectDb(attempt + 1), RETRY_DELAY_MS);
     } else {
-      console.error('💀 Could not connect after', MAX_RETRIES, 'attempts. Check your .env file and DB credentials in Hostinger hPanel.');
+      console.error('💀 Could not connect after', MAX_RETRIES, 'attempts.');
+      console.error('👉 Check your .env file — DB_HOST, DB_USER, DB_PASSWORD, DB_NAME must all be set.');
     }
   }
 }

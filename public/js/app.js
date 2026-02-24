@@ -112,7 +112,10 @@ const api = {
     if (body) opts.body = JSON.stringify(body);
     const res = await fetch('/api' + path, opts);
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    if (!res.ok) {
+      if (res.status === 503) throw new Error('Server is starting up — please wait a moment and try again.');
+      throw new Error(data.error || `HTTP ${res.status}`);
+    }
     return data;
   },
   get(path)         { return this._fetch('GET',    path); },
