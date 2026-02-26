@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+
+  app:
+    build: .
+    container_name: mmotask-app
+    restart: unless-stopped
+    ports:
+      - "1234:3000"        # Accessible on VPS port 1234
+    environment:
+      PORT: "3000"
+      DB_HOST: db          # Resolves to the db container inside mmotask-net
+      DB_PORT: "3306"
+      DB_USER: mmotask_user
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: mmotask_db
+      JWT_SECRET: ${JWT_SECRET}
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - mmotask-net
+
+  db:
+    image: mysql:8.0
+    container_name: mmotask-db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: mmotask_db
+      MYSQL_USER: mmotask_user
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - mmotask-db-data:/var/lib/mysql   # Data persists across restarts
+    networks:
+      - mmotask-net
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+networks:
+  mmotask-net:
+    driver: bridge   # Isolated from n8n — no port or network conflicts
+
+volumes:
+  mmotask-db-data:

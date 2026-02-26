@@ -1,0 +1,8 @@
+node_modules
+.git
+.env
+*.db
+.claude
+*.log
+npm-debug.log*
+README.md
