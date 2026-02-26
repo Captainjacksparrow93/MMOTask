@@ -201,7 +201,15 @@ router.put('/:id', authenticate, adminOnly, async (req, res) => {
 // ── PATCH /api/tasks/:id/progress — update progress % ────────────────────────
 router.patch('/:id/progress', authenticate, async (req, res) => {
   try {
-    const db       = getDb();
+    const db = getDb();
+
+    // Auth guard: only admin or the assigned team member may update progress
+    const [[existing]] = await db.execute('SELECT * FROM tasks WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Task not found' });
+    if (!req.user.is_admin && Number(existing.assigned_to) !== Number(req.user.id)) {
+      return res.status(403).json({ error: 'Not authorised to update this task' });
+    }
+
     const progress = Math.min(100, Math.max(0, parseInt(req.body.progress) || 0));
     const status   = progress === 100 ? 'completed' : progress > 0 ? 'in_progress' : 'pending';
     const now      = progress === 100 ? nowStr() : null;
@@ -214,7 +222,6 @@ router.patch('/:id/progress', authenticate, async (req, res) => {
     );
 
     const [[task]] = await db.execute(TASK_SELECT + ' WHERE t.id = ?', [req.params.id]);
-    if (!task) return res.status(404).json({ error: 'Task not found' });
     res.json(task);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -235,7 +242,8 @@ router.patch('/:id/status', authenticate, async (req, res) => {
     if (!existing) return res.status(404).json({ error: 'Task not found' });
 
     // Only admin or the assigned team member may update status
-    if (!req.user.is_admin && existing.assigned_to !== req.user.id) {
+    // Use Number() coercion to handle int vs string type differences from JWT/MySQL
+    if (!req.user.is_admin && Number(existing.assigned_to) !== Number(req.user.id)) {
       return res.status(403).json({ error: 'Not authorised to update this task' });
     }
 

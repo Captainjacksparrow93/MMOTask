@@ -1288,75 +1288,96 @@ function renderTaskCard(t, showAssignee = false) {
   // Progress bar fill color
   const fillClass = isDone ? 'done' : '';
 
-  // Punch state for team members
-  const isAssignedToMe = !state.user.is_admin && t.assigned_to === state.user.id;
+  // Punch state for team members — use Number() to handle int/string type differences
+  const isAssignedToMe = Number(state.user.is_admin) !== 1 && Number(t.assigned_to) === Number(state.user.id);
   const isPunchedIn    = state.punchLog && state.punchLog.punch_in && !state.punchLog.punch_out;
   const isPunchedOut   = state.punchLog && state.punchLog.punch_in && state.punchLog.punch_out;
 
-  // Timer display — only for the assigned team member, only when punched in
+  // Timer section (compact — lives in card footer-left)
   let timerSection = '';
   if (!isDone && isAssignedToMe) {
     if (!state.punchLog || !state.punchLog.punch_in) {
-      // Not punched in yet — show hint
-      timerSection = `<div class="task-timer-row"><span class="punch-required-hint"><i class="fas fa-lock"></i> Punch in to enable timer</span></div>`;
+      timerSection = `<span class="punch-required-hint"><i class="fas fa-lock"></i> Punch in to enable timer</span>`;
     } else if (isPunchedOut) {
-      // Punched out — show locked
-      timerSection = `<div class="task-timer-row"><span class="punch-required-hint"><i class="fas fa-lock"></i> Punched out for today</span></div>`;
+      timerSection = `<span class="punch-required-hint"><i class="fas fa-lock"></i> Punched out for today</span>`;
     } else if (t.status !== 'in_progress') {
-      // Punched in but not in_progress — show hint
-      timerSection = `<div class="task-timer-row"><span class="punch-required-hint"><i class="fas fa-clock"></i> Set status to In Progress to start timer</span></div>`;
+      timerSection = `<span class="punch-required-hint"><i class="fas fa-clock"></i> Set In Progress to start timer</span>`;
     } else {
-      // Punched in AND in_progress — show timer controls
       const timerVal = isRunning
-        ? `<span class="timer-display" data-task-id="${t.id}">${formatSeconds(Math.floor((Date.now() - new Date(state.activeTimer.started_at)) / 1000))}</span>`
+        ? `<span class="timer-display" data-task-id="${t.id}">${formatSeconds(Math.floor((Date.now() - new Date(state.activeTimer.started_at.includes('Z') ? state.activeTimer.started_at : state.activeTimer.started_at.replace(' ','T')+'Z')) / 1000))}</span>`
         : `<span class="timer-display stopped" data-task-id="${t.id}">00:00:00</span>`;
       const timerBtn = isRunning
         ? `<button class="timer-stop-btn" onclick="stopTaskTimer(${t.id})"><i class="fas fa-stop"></i> Stop</button>`
         : `<button class="timer-start-btn" onclick="startTaskTimer(${t.id})"><i class="fas fa-play"></i> Start</button>`;
-      timerSection = `<div class="task-timer-row">${timerVal}${timerBtn}</div>`;
+      timerSection = `${timerVal}${timerBtn}`;
     }
   }
 
-  // Feedback button (shown to team members on non-completed, non-client_feedback tasks)
+  // Feedback button
   const feedbackBtn = (isAssignedToMe && !isDone && t.status !== 'client_feedback' && isPunchedIn)
-    ? `<button class="feedback-btn" title="Mark as Client Feedback" onclick="showFeedbackModal(${t.id}, '${escHtml(t.title.replace(/'/g,"\\'"))}')"><i class="fas fa-comment-dots"></i> Feedback</button>`
+    ? `<button class="feedback-btn" onclick="showFeedbackModal(${t.id}, '${escHtml(t.title.replace(/'/g,"\\'"))}')"><i class="fas fa-comment-dots"></i> Feedback</button>`
     : '';
 
-  // Description click hint (for team members with description)
+  // Description clickable title
   const titleClickable = t.description ? `style="cursor:pointer" onclick="showTaskDescriptionModal(${t.id})" title="Click to view description"` : '';
+
+  // Progress bar — interactive overlay slider for assigned+punched-in employee, static otherwise
+  const canEditProgress = isAssignedToMe && isPunchedIn && !isDone;
+  const progressOverlay = canEditProgress
+    ? `<input type="range" class="progress-slider-overlay" min="0" max="100" value="${progress}"
+         oninput="this.previousElementSibling.style.width=this.value+'%';this.closest('.progress-section').querySelector('.progress-pct').textContent=this.value+'%'"
+         onchange="saveTaskProgress(${t.id}, this.value)">`
+    : '';
+
+  // Build meta items with dot separators
+  const metaItems = [];
+  if (t.client_name) metaItems.push(`<span class="meta-item"><i class="fas fa-building"></i>${escHtml(t.client_name)}</span>`);
+  metaItems.push(`<span class="meta-item"><i class="fas fa-tag"></i>${escHtml(t.task_type_name||'')}</span>`);
+  if (showAssignee && t.assignee_name) metaItems.push(`<span class="meta-item"><i class="fas fa-user"></i>${escHtml(t.assignee_name)}</span>`);
+  metaItems.push(`<span class="meta-item ${isOverdue?'text-danger':''}"><i class="fas fa-calendar-alt"></i>${formatDateShort(t.deadline)}${isOverdue?' ⚠️':''}</span>`);
+  if (t.eta) metaItems.push(`<span class="meta-item eta-badge"><i class="fas fa-arrow-right"></i>ETA ${formatDateShort(t.eta)}</span>`);
+  if (t.feedback_notes) metaItems.push(`<span class="meta-item" style="color:#92400e"><i class="fas fa-comment"></i>${escHtml(t.feedback_notes)}</span>`);
 
   return `
     <div class="task-card urgency-${t.urgency} status-${t.status}">
-      <div class="task-card-top">
-        <div class="task-card-title ${isDone?'completed-text':''}" ${titleClickable}>${escHtml(t.title)}${t.description ? ' <i class="fas fa-info-circle" style="font-size:10px;color:var(--text-muted);margin-left:3px"></i>' : ''}</div>
-        <div class="task-card-actions">
+
+      <!-- Header: status pill (left) · revision badge + actions (right) -->
+      <div class="task-card-header">
+        <div class="task-card-header-left">
+          ${renderStatusDropdown(t)}
           ${revCount > 0 ? `<span class="revision-badge"><i class="fas fa-rotate"></i>${revCount}</span>` : ''}
+        </div>
+        <div class="task-card-header-right">
           ${renderTaskActions(t)}
         </div>
       </div>
+
+      <!-- Title -->
+      <div class="task-card-title ${isDone?'completed-text':''}" ${titleClickable}>${escHtml(t.title)}${t.description ? ' <i class="fas fa-info-circle" style="font-size:10px;color:var(--text-muted);margin-left:3px"></i>' : ''}</div>
+
+      <!-- Meta: compact dot-separated chips -->
       <div class="task-card-meta">
-        ${t.client_name ? `<span class="meta-item"><i class="fas fa-building"></i>${escHtml(t.client_name)}</span>` : ''}
-        <span class="meta-item"><i class="fas fa-tag"></i>${escHtml(t.task_type_name||'')}</span>
-        ${showAssignee && t.assignee_name ? `<span class="meta-item"><i class="fas fa-user"></i>${escHtml(t.assignee_name)}</span>` : ''}
-        <span class="meta-item ${isOverdue?'text-danger':''}"><i class="fas fa-flag"></i>Due: ${formatDateShort(t.deadline)}${isOverdue?' ⚠️':''}</span>
-        ${t.eta ? `<span class="meta-item eta-badge"><i class="fas fa-clock"></i>ETA: ${formatDateShort(t.eta)}</span>` : ''}
-        ${t.feedback_notes ? `<span class="meta-item" style="color:#92400e"><i class="fas fa-comment"></i>${escHtml(t.feedback_notes)}</span>` : ''}
+        ${metaItems.map((item, i) => i === 0 ? item : `<span class="meta-dot">·</span>${item}`).join('')}
       </div>
-      ${timerSection}
-      <div class="progress-row">
-        <input type="range" class="progress-slider" min="0" max="100" value="${progress}"
-          ${(isDone || (isAssignedToMe && isPunchedOut))?'disabled':''} oninput="this.nextElementSibling.textContent=this.value+'%'"
-          onchange="saveTaskProgress(${t.id}, this.value)">
+
+      <!-- Progress: visual bar + interactive overlay slider for employees -->
+      <div class="progress-section">
+        <div class="progress-track">
+          <div class="progress-fill ${fillClass}" style="width:${progress}%"></div>
+          ${progressOverlay}
+        </div>
         <span class="progress-pct">${progress}%</span>
       </div>
-      <div class="progress-bar-thin">
-        <div class="progress-bar-thin-fill ${fillClass}" style="width:${progress}%"></div>
-      </div>
+
+      <!-- Footer: timer/hint left · urgency + feedback right -->
       <div class="task-card-footer">
-        ${urgencyBadge(t.urgency)}
-        ${renderStatusDropdown(t)}
-        ${feedbackBtn}
+        <div class="task-card-footer-left">${timerSection}</div>
+        <div class="task-card-footer-right">
+          ${urgencyBadge(t.urgency)}
+          ${feedbackBtn}
+        </div>
       </div>
+
     </div>`;
 }
 
@@ -1393,16 +1414,20 @@ function renderStatusDropdown(t) {
   ];
 
   // Team members: disable status change if not punched in or already punched out
-  const isAssignedToMe = !state.user.is_admin && t.assigned_to === state.user.id;
-  const isPunchedIn  = state.punchLog && state.punchLog.punch_in && !state.punchLog.punch_out;
-  const isPunchedOut = state.punchLog && state.punchLog.punch_in  && state.punchLog.punch_out;
-  const locked = isAssignedToMe && (!state.punchLog || !state.punchLog.punch_in || isPunchedOut);
+  // Use Number() coercion: MySQL TINYINT(1) / JWT may send is_admin as "0" or "1" string
+  const isAdmin        = Number(state.user.is_admin) === 1;
+  const isAssignedToMe = !isAdmin && Number(t.assigned_to) === Number(state.user.id);
+  const isPunchedIn    = state.punchLog && state.punchLog.punch_in && !state.punchLog.punch_out;
+  const isPunchedOut   = state.punchLog && state.punchLog.punch_in && state.punchLog.punch_out;
+  // Non-admin viewing a task not assigned to them → always locked (static badge)
+  const locked = !isAdmin && (!isAssignedToMe || !state.punchLog || !state.punchLog.punch_in || isPunchedOut);
 
   if (locked) {
-    return `<span class="badge badge-${t.status}" title="${isPunchedOut ? 'Punched out for today' : 'Punch in to update status'}" style="opacity:0.6">${STATUS_LABEL[t.status]||t.status}</span>`;
+    const lockTitle = isPunchedOut ? 'Punched out for today' : !isAssignedToMe ? 'Not assigned to you' : 'Punch in to update status';
+    return `<span class="badge badge-${t.status} task-status-badge" title="${lockTitle}" style="opacity:0.7">${STATUS_LABEL[t.status]||t.status}</span>`;
   }
 
-  return `<select class="badge badge-${t.status}" style="border:none;cursor:pointer;background:transparent;padding:3px 6px;font-size:11px;font-weight:600;border-radius:20px"
+  return `<select class="badge badge-${t.status} task-status-select"
     data-prev="${t.status}" onchange="updateStatus(${t.id}, this.value, this)">
     ${opts.map(o => `<option value="${o.v}" ${t.status===o.v?'selected':''}>${o.l}</option>`).join('')}
   </select>`;
@@ -1429,7 +1454,8 @@ async function updateStatus(id, status, selectEl) {
     }
 
     // Admins use the full PUT endpoint; team members use the lightweight PATCH /status
-    if (state.user.is_admin) {
+    // Use Number() coercion: MySQL TINYINT(1) may arrive from JWT as string "0"/"1"
+    if (Number(state.user.is_admin) === 1) {
       await api.put(`/tasks/${id}`, { status });
     } else {
       await api.patch(`/tasks/${id}/status`, { status });
