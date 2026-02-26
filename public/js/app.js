@@ -95,7 +95,10 @@ function formatMinutes(m) {
 
 function formatTime12(isoStr) {
   if (!isoStr) return '—';
-  const d = new Date(isoStr);
+  // Server stores UTC times as "YYYY-MM-DD HH:MM:SS" (no timezone marker).
+  // Appending 'Z' ensures the browser parses it as UTC so local display is correct.
+  const utcStr = isoStr.includes('Z') || isoStr.includes('+') ? isoStr : isoStr.replace(' ', 'T') + 'Z';
+  const d = new Date(utcStr);
   let h = d.getHours(), m = d.getMinutes();
   const ampm = h >= 12 ? 'PM' : 'AM';
   h = h % 12 || 12;
@@ -410,7 +413,7 @@ function renderPunchWidget(log) {
 
   let clockHtml, statusHtml, btnHtml;
   if (punchedIn) {
-    clockHtml  = `<div class="punch-clock" id="punch-clock">${formatSeconds(Math.floor((Date.now() - new Date(log.punch_in)) / 1000))}</div>`;
+    clockHtml  = `<div class="punch-clock" id="punch-clock">${formatSeconds(Math.floor((Date.now() - new Date(log.punch_in.replace(' ', 'T') + 'Z')) / 1000))}</div>`;
     statusHtml = `<div class="punch-status"><div class="punch-status-label">Punched in at</div><div class="punch-status-time">${formatTime12(log.punch_in)}</div></div>`;
     btnHtml    = `<button class="btn punch-btn-out" onclick="doPunchOut()"><i class="fas fa-stop-circle"></i> Punch Out</button>`;
   } else if (punchedOut) {
@@ -436,7 +439,8 @@ function startPunchClock(punchInISO) {
   state.punchInterval = setInterval(() => {
     const el = document.getElementById('punch-clock');
     if (!el) { clearInterval(state.punchInterval); return; }
-    el.textContent = formatSeconds(Math.floor((Date.now() - new Date(punchInISO)) / 1000));
+    const punchInUTC = punchInISO.includes('Z') || punchInISO.includes('+') ? punchInISO : punchInISO.replace(' ', 'T') + 'Z';
+    el.textContent = formatSeconds(Math.floor((Date.now() - new Date(punchInUTC)) / 1000));
   }, 1000);
 }
 
@@ -1424,7 +1428,12 @@ async function updateStatus(id, status, selectEl) {
       } catch(_) {}
     }
 
-    await api.put(`/tasks/${id}`, { status });
+    // Admins use the full PUT endpoint; team members use the lightweight PATCH /status
+    if (state.user.is_admin) {
+      await api.put(`/tasks/${id}`, { status });
+    } else {
+      await api.patch(`/tasks/${id}/status`, { status });
+    }
     selectEl.className = `badge badge-${status}`;
     selectEl.dataset.prev = status;
     showToast(`Status updated to ${STATUS_LABEL[status]}`);
@@ -1455,10 +1464,17 @@ async function deleteTask(id, title) {
 // ── Add Task Modal ───────────────────────────────────────────────
 async function showAddTaskModal() {
   if (state.taskTypes.length === 0) state.taskTypes = await api.get('/task-types');
+  // Load all team members upfront so the assignee dropdown is always visible
+  _addTaskAllUsers = await api.get('/users');
 
   const typeOptions = state.taskTypes.map(tt =>
     `<option value="${tt.id}" data-role="${tt.role_id}">${escHtml(tt.name)} (${escHtml(tt.role_name||'')})</option>`
   ).join('');
+
+  const userOptions = '<option value="">— Unassigned —</option>' +
+    _addTaskAllUsers.map(u =>
+      `<option value="${u.id}">${escHtml(u.name)} (${u.active_tasks} active)</option>`
+    ).join('');
 
   const html = `
     <form id="task-form">
@@ -1501,16 +1517,16 @@ async function showAddTaskModal() {
         </div>
       </div>
 
-      <div id="assignment-preview" style="display:none" class="assign-preview">
-        <i class="fas fa-robot"></i>
-        <span id="assign-preview-text">Auto-assigning…</span>
+      <div class="form-group" id="assignee-group">
+        <label>Assign To <span class="form-hint" style="display:inline">(select task type &amp; deadline to filter by role)</span></label>
+        <select name="assigned_to" id="assignee-sel">
+          ${userOptions}
+        </select>
       </div>
 
-      <div class="form-group" id="assignee-group" style="display:none">
-        <label>Assign To <span class="form-hint" style="display:inline">(auto-selected by workload)</span></label>
-        <select name="assigned_to" id="assignee-sel">
-          <option value="">— Let system decide —</option>
-        </select>
+      <div id="assignment-preview" style="display:none" class="assign-preview">
+        <i class="fas fa-robot"></i>
+        <span id="assign-preview-text">Select task type &amp; deadline to see suggested assignee.</span>
       </div>
 
       <div class="form-group">
@@ -1526,13 +1542,13 @@ async function showAddTaskModal() {
 
   showModal('Add New Task', html, async (formData) => {
     const payload = {
-      title:       formData.get('title'),
-      client_name: formData.get('client_name') || null,
+      title:        formData.get('title'),
+      client_name:  formData.get('client_name') || null,
       task_type_id: parseInt(formData.get('task_type_id')),
-      urgency:     formData.get('urgency'),
-      deadline:    formData.get('deadline'),
-      description: formData.get('description') || null,
-      eta:         formData.get('eta') || null,
+      urgency:      formData.get('urgency'),
+      deadline:     formData.get('deadline'),
+      description:  formData.get('description') || null,
+      eta:          formData.get('eta') || null,
     };
     const assignedTo = formData.get('assigned_to');
     if (assignedTo) payload.assigned_to = parseInt(assignedTo);
@@ -1545,36 +1561,62 @@ async function showAddTaskModal() {
 
 // Called when task type or deadline changes in Add Task modal
 let _previewTimeout = null;
+let _addTaskAllUsers = [];
 async function previewAssignment() {
   clearTimeout(_previewTimeout);
   _previewTimeout = setTimeout(async () => {
-    const typeId  = document.getElementById('task-type-sel')?.value;
+    const typeId   = document.getElementById('task-type-sel')?.value;
     const deadline = document.getElementById('task-deadline-inp')?.value;
-    if (!typeId || !deadline) return;
 
     const previewBox  = document.getElementById('assignment-preview');
     const previewText = document.getElementById('assign-preview-text');
-    const assigneeGrp = document.getElementById('assignee-group');
     const assigneeSel = document.getElementById('assignee-sel');
+
+    if (!typeId || !deadline) {
+      // Not enough info yet — hide preview, reset dropdown to all users
+      if (previewBox) previewBox.style.display = 'none';
+      if (assigneeSel && _addTaskAllUsers.length > 0) {
+        const prev = assigneeSel.value;
+        assigneeSel.innerHTML = '<option value="">— Unassigned —</option>' +
+          _addTaskAllUsers.map(u =>
+            `<option value="${u.id}" ${String(u.id) === prev ? 'selected' : ''}>${escHtml(u.name)} (${u.active_tasks} active)</option>`
+          ).join('');
+      }
+      return;
+    }
 
     previewBox.style.display = 'flex';
     previewText.textContent  = 'Calculating best assignment…';
 
     try {
-      const data = await api.get(`/tasks/assignment-preview?task_type_id=${typeId}&deadline=${deadline}`);
-      const suggested = data.available_users.find(u => u.id === data.suggested_user_id);
-      previewText.innerHTML = `Will be assigned to <strong>${suggested ? suggested.name : 'Unassigned'}</strong>. Override below if needed.`;
+      // API returns { task_type, candidates: [{id, name, today_count}] } sorted by today_count ASC
+      const data       = await api.get(`/tasks/assignment-preview?task_type_id=${typeId}&deadline=${deadline}`);
+      const candidates = data.candidates || [];
+      const suggested  = candidates[0]; // least busy = first entry
 
-      // Populate override dropdown
-      if (assigneeSel && data.available_users.length > 0) {
-        assigneeSel.innerHTML = '<option value="">— System choice —</option>' +
-          data.available_users.map(u =>
-            `<option value="${u.id}" ${u.id === data.suggested_user_id ? 'selected' : ''}>${escHtml(u.name)} (${u.active_tasks} active)</option>`
-          ).join('');
-        assigneeGrp.style.display = 'block';
+      if (suggested) {
+        previewText.innerHTML = `Suggested: <strong>${escHtml(suggested.name)}</strong> — ${suggested.today_count} task${suggested.today_count !== 1 ? 's' : ''} on that day. Override below if needed.`;
+      } else {
+        previewText.innerHTML = `No team members found for this task type's role. Showing all users.`;
+      }
+
+      // Repopulate dropdown: role-matched candidates (or fall back to all users)
+      if (assigneeSel) {
+        const prev = assigneeSel.value;
+        const list = candidates.length > 0 ? candidates : _addTaskAllUsers;
+        const isCandidate = candidates.length > 0;
+        assigneeSel.innerHTML = '<option value="">— Unassigned —</option>' +
+          list.map(u => {
+            const label = isCandidate
+              ? `${escHtml(u.name)} (${u.today_count} task${u.today_count !== 1 ? 's' : ''} on deadline day)`
+              : `${escHtml(u.name)} (${u.active_tasks} active)`;
+            // Auto-select suggested if nothing was chosen yet
+            const isSel = prev ? String(u.id) === prev : (suggested && u.id === suggested.id);
+            return `<option value="${u.id}" ${isSel ? 'selected' : ''}>${label}</option>`;
+          }).join('');
       }
     } catch(e) {
-      previewText.textContent = 'Could not preview assignment — check task type and deadline.';
+      previewText.textContent = 'Could not load assignment preview.';
     }
   }, 400);
 }

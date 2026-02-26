@@ -221,6 +221,39 @@ router.patch('/:id/progress', authenticate, async (req, res) => {
   }
 });
 
+// ── PATCH /api/tasks/:id/status — update status only (admin OR assigned user) ─
+router.patch('/:id/status', authenticate, async (req, res) => {
+  try {
+    const db = getDb();
+    const allowed = ['pending', 'in_progress', 'on_hold', 'client_feedback', 'completed'];
+    const { status } = req.body;
+    if (!status || !allowed.includes(status)) {
+      return res.status(400).json({ error: `status must be one of: ${allowed.join(', ')}` });
+    }
+
+    const [[existing]] = await db.execute('SELECT * FROM tasks WHERE id = ?', [req.params.id]);
+    if (!existing) return res.status(404).json({ error: 'Task not found' });
+
+    // Only admin or the assigned team member may update status
+    if (!req.user.is_admin && existing.assigned_to !== req.user.id) {
+      return res.status(403).json({ error: 'Not authorised to update this task' });
+    }
+
+    const completedAt = status === 'completed' && existing.status !== 'completed'
+      ? nowStr() : existing.completed_at;
+
+    await db.execute(
+      'UPDATE tasks SET status = ?, completed_at = ? WHERE id = ?',
+      [status, completedAt, req.params.id]
+    );
+
+    const [[task]] = await db.execute(TASK_SELECT + ' WHERE t.id = ?', [req.params.id]);
+    res.json(task);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── POST /api/tasks/:id/timer/start ──────────────────────────────────────────
 router.post('/:id/timer/start', authenticate, async (req, res) => {
   try {
