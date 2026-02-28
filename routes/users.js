@@ -46,7 +46,7 @@ router.post('/', authenticate, adminOnly, async (req, res) => {
     );
     res.status(201).json({ ...rows[0], is_admin: Boolean(rows[0].is_admin) });
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: 'Email already exists' });
+    if (err.code === '23505') return res.status(400).json({ error: 'Email already exists' });
     res.status(500).json({ error: err.message });
   }
 });
@@ -84,7 +84,7 @@ router.put('/:id', authenticate, adminOnly, async (req, res) => {
     );
     res.json({ ...rows[0], is_admin: Boolean(rows[0].is_admin) });
   } catch (err) {
-    if (err.code === 'ER_DUP_ENTRY') return res.status(400).json({ error: 'Email already exists' });
+    if (err.code === '23505') return res.status(400).json({ error: 'Email already exists' });
     res.status(500).json({ error: err.message });
   }
 });

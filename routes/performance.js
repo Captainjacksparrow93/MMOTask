@@ -57,7 +57,7 @@ router.get('/', authenticate, adminOnly, async (req, res) => {
       const avgRevisions   = totalRevisions / total;
 
       const [[{ cnt: distinctDays }]] = await db.execute(
-        `SELECT COUNT(DISTINCT DATE(completed_at)) as cnt
+        `SELECT COUNT(DISTINCT completed_at::date) as cnt
          FROM tasks WHERE assigned_to = ? AND status = 'completed' AND completed_at IS NOT NULL`,
         [user.id]
       );

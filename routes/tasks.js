@@ -271,7 +271,7 @@ router.post('/:id/timer/start', authenticate, async (req, res) => {
     // Stop any other running timer for this user
     await db.execute(
       `UPDATE task_time_logs
-       SET ended_at = ?, duration_secs = TIMESTAMPDIFF(SECOND, started_at, ?)
+       SET ended_at = ?, duration_secs = EXTRACT(EPOCH FROM (?::timestamptz - started_at))::INTEGER
        WHERE user_id = ? AND ended_at IS NULL`,
       [now, now, req.user.id]
     );
@@ -309,7 +309,7 @@ router.post('/:id/timer/stop', authenticate, async (req, res) => {
 
     await db.execute(
       `UPDATE task_time_logs
-       SET ended_at = ?, duration_secs = TIMESTAMPDIFF(SECOND, started_at, ?)
+       SET ended_at = ?, duration_secs = EXTRACT(EPOCH FROM (?::timestamptz - started_at))::INTEGER
        WHERE id = ?`,
       [now, now, log.id]
     );

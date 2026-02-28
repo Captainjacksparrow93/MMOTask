@@ -1,189 +1,216 @@
 /**
- * database/db.js
+ * database/db.js — Neon Serverless PostgreSQL
  *
- * MySQL2 (promise) pool — used on Hostinger Node.js hosting.
- * Credentials come from environment variables (set in Hostinger's control panel
- * or a local .env file).
+ * Uses Neon's HTTP-based query API (@neondatabase/serverless).
+ * No WebSocket, no TCP connections — perfect for Vercel serverless.
+ * Only one env var needed: DATABASE_URL (from neon.tech dashboard).
  *
- * API exposed:
- *   getDb()         — returns the mysql2 promise pool (synchronous getter)
- *   initDatabase()  — async; creates tables, seeds initial data
- *
- * Every route uses:
- *   const db = getDb();
- *   const [rows]   = await db.execute(sql, [param1, param2, ...]);
- *   const [result] = await db.execute(insertSql, [...]); // result.insertId
+ * mysql2-compatible wrapper so route files need minimal changes:
+ *   db.execute(sql, params)
+ *     — ? placeholders auto-converted to $1, $2, …
+ *     — SELECT / UPDATE / DELETE → [rows, null]
+ *     — INSERT                  → [{ insertId, affectedRows }, null]
+ *                                  (RETURNING id is appended automatically)
  */
 
-const mysql  = require('mysql2/promise');
+const { neon, neonConfig } = require('@neondatabase/serverless');
 const bcrypt = require('bcryptjs');
 
-let pool = null;
+// Reuse HTTP connections within a single serverless invocation
+neonConfig.fetchConnectionCache = true;
 
-// ── Synchronous getter — call after initDatabase() completes ────────────────
+let _db = null;
+
+// ── Synchronous getter ───────────────────────────────────────────────────────
 function getDb() {
-  if (!pool) throw new Error('DB not initialised — await initDatabase() first');
-  return pool;
+  if (!_db) throw new Error('DB not initialised — await initDatabase() first');
+  return _db;
+}
+
+// ── mysql2-compatible wrapper around the neon HTTP function ──────────────────
+function createDb(sqlFn) {
+  async function execute(sqlStr, params = []) {
+    // 1. Convert ? → $n
+    let n = 0;
+    const pgSql = sqlStr.replace(/\?/g, () => `$${++n}`);
+
+    // 2. Auto-append RETURNING id to bare INSERT statements
+    const isInsert = /^\s*INSERT\s+/i.test(pgSql);
+    const finalSql = (isInsert && !/\bRETURNING\b/i.test(pgSql))
+      ? pgSql + ' RETURNING id'
+      : pgSql;
+
+    // 3. Replace undefined with null (pg rejects undefined values)
+    const safeParams = params.map(p => (p === undefined ? null : p));
+
+    // 4. Execute via Neon HTTP API — returns plain array of row objects
+    const rows = await sqlFn(finalSql, safeParams);
+
+    // 5. Return mysql2-style tuple
+    if (isInsert) {
+      return [{ insertId: rows[0]?.id ?? null, affectedRows: rows.length }, null];
+    }
+    return [rows, null];
+  }
+
+  return {
+    execute,
+    query: (s, p) => sqlFn(s, p),
+    // getConnection() used only during initDatabase schema work — no-op release
+    async getConnection() {
+      return { execute, query: (s, p) => sqlFn(s, p), release: () => {} };
+    },
+  };
 }
 
 // ── initDatabase — async, called once at server startup ─────────────────────
 async function initDatabase() {
-  pool = mysql.createPool({
-    host:               process.env.DB_HOST     || 'localhost',
-    port:               parseInt(process.env.DB_PORT || '3306'),
-    user:               process.env.DB_USER     || 'root',
-    password:           process.env.DB_PASSWORD || '',
-    database:           process.env.DB_NAME     || 'agency_tasks',
-    waitForConnections: true,
-    connectionLimit:    10,
-    connectTimeout:     10000,  // fail fast (10 s) — prevents hanging on unreachable hosts
-    dateStrings:        true,   // return DATE/DATETIME as strings, not Date objects
-  });
+  const connectionString = process.env.DATABASE_URL;
+  if (!connectionString) {
+    throw new Error(
+      'DATABASE_URL is not set. ' +
+      'Add it in Vercel → Settings → Environment Variables. ' +
+      'Get the value from https://console.neon.tech → your project → Connection string.'
+    );
+  }
 
-  // Test connection
-  const conn = await pool.getConnection();
+  const sqlFn = neon(connectionString);
 
-  // ── Create tables ──────────────────────────────────────────────────────────
-  await conn.execute(`CREATE TABLE IF NOT EXISTS roles (
-    id         INT AUTO_INCREMENT PRIMARY KEY,
+  // ── Create tables (all idempotent via IF NOT EXISTS) ──────────────────────
+  await sqlFn(`CREATE TABLE IF NOT EXISTS roles (
+    id         SERIAL PRIMARY KEY,
     name       VARCHAR(255) NOT NULL UNIQUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ  DEFAULT NOW()
   )`);
 
-  await conn.execute(`CREATE TABLE IF NOT EXISTS users (
-    id         INT AUTO_INCREMENT PRIMARY KEY,
+  await sqlFn(`CREATE TABLE IF NOT EXISTS users (
+    id         SERIAL PRIMARY KEY,
     name       VARCHAR(255) NOT NULL,
     email      VARCHAR(255) UNIQUE NOT NULL,
     password   VARCHAR(255) NOT NULL,
-    role_id    INT,
-    is_admin   TINYINT(1) DEFAULT 0,
-    is_active  TINYINT(1) DEFAULT 1,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (role_id) REFERENCES roles(id)
+    role_id    INT  REFERENCES roles(id),
+    is_admin   SMALLINT DEFAULT 0,
+    is_active  SMALLINT DEFAULT 1,
+    created_at TIMESTAMPTZ DEFAULT NOW()
   )`);
 
-  await conn.execute(`CREATE TABLE IF NOT EXISTS task_types (
-    id             INT AUTO_INCREMENT PRIMARY KEY,
+  await sqlFn(`CREATE TABLE IF NOT EXISTS task_types (
+    id             SERIAL PRIMARY KEY,
     name           VARCHAR(255) NOT NULL,
-    role_id        INT NOT NULL,
+    role_id        INT NOT NULL REFERENCES roles(id),
     daily_capacity INT DEFAULT 2,
-    is_predefined  TINYINT(1) DEFAULT 0,
-    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (role_id) REFERENCES roles(id)
+    is_predefined  SMALLINT DEFAULT 0,
+    created_at     TIMESTAMPTZ DEFAULT NOW()
   )`);
 
-  await conn.execute(`CREATE TABLE IF NOT EXISTS tasks (
-    id              INT AUTO_INCREMENT PRIMARY KEY,
+  await sqlFn(`CREATE TABLE IF NOT EXISTS tasks (
+    id              SERIAL PRIMARY KEY,
     title           VARCHAR(500) NOT NULL,
     description     TEXT,
     client_name     VARCHAR(255),
-    task_type_id    INT NOT NULL,
-    urgency         VARCHAR(50) DEFAULT 'medium',
+    task_type_id    INT NOT NULL REFERENCES task_types(id),
+    urgency         VARCHAR(50)  DEFAULT 'medium',
     deadline        DATE NOT NULL,
     buffer_deadline DATE NOT NULL,
-    assigned_to     INT,
-    status          VARCHAR(50) DEFAULT 'pending',
-    progress        INT DEFAULT 0,
-    revision_count  INT DEFAULT 0,
+    assigned_to     INT  REFERENCES users(id),
+    status          VARCHAR(50)  DEFAULT 'pending',
+    progress        INT  DEFAULT 0,
+    revision_count  INT  DEFAULT 0,
     feedback_notes  TEXT,
-    completed_at    DATETIME,
+    completed_at    TIMESTAMPTZ,
     eta             VARCHAR(255),
-    created_by      INT,
-    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-    FOREIGN KEY (task_type_id) REFERENCES task_types(id),
-    FOREIGN KEY (assigned_to)  REFERENCES users(id),
-    FOREIGN KEY (created_by)   REFERENCES users(id)
+    created_by      INT  REFERENCES users(id),
+    created_at      TIMESTAMPTZ DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ DEFAULT NOW()
   )`);
 
-  await conn.execute(`CREATE TABLE IF NOT EXISTS time_logs (
-    id               INT AUTO_INCREMENT PRIMARY KEY,
-    user_id          INT NOT NULL,
+  await sqlFn(`CREATE TABLE IF NOT EXISTS time_logs (
+    id               SERIAL PRIMARY KEY,
+    user_id          INT NOT NULL REFERENCES users(id),
     date             DATE NOT NULL,
-    punch_in         DATETIME,
-    punch_out        DATETIME,
+    punch_in         TIMESTAMPTZ,
+    punch_out        TIMESTAMPTZ,
     duration_minutes INT DEFAULT 0,
-    FOREIGN KEY (user_id) REFERENCES users(id),
-    UNIQUE KEY uk_user_date (user_id, date)
+    UNIQUE(user_id, date)
   )`);
 
-  await conn.execute(`CREATE TABLE IF NOT EXISTS task_time_logs (
-    id            INT AUTO_INCREMENT PRIMARY KEY,
-    task_id       INT NOT NULL,
-    user_id       INT NOT NULL,
-    started_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    ended_at      DATETIME,
-    duration_secs INT DEFAULT 0,
-    FOREIGN KEY (task_id) REFERENCES tasks(id),
-    FOREIGN KEY (user_id) REFERENCES users(id)
+  await sqlFn(`CREATE TABLE IF NOT EXISTS task_time_logs (
+    id            SERIAL PRIMARY KEY,
+    task_id       INT NOT NULL REFERENCES tasks(id),
+    user_id       INT NOT NULL REFERENCES users(id),
+    started_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    ended_at      TIMESTAMPTZ,
+    duration_secs INT DEFAULT 0
   )`);
 
-  // ── Add new columns to existing tasks table (idempotent) ──────────────────
-  const [dbRow] = await conn.execute('SELECT DATABASE() AS db');
-  const dbName  = dbRow[0].db;
+  // ── Auto-update updated_at trigger ────────────────────────────────────────
+  await sqlFn(`
+    CREATE OR REPLACE FUNCTION update_updated_at()
+    RETURNS TRIGGER AS $$
+    BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+    $$ LANGUAGE plpgsql
+  `);
+  await sqlFn(`DROP TRIGGER IF EXISTS tasks_updated_at ON tasks`);
+  await sqlFn(`
+    CREATE TRIGGER tasks_updated_at
+      BEFORE UPDATE ON tasks
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at()
+  `);
 
-  const alterColumns = [
-    { table: 'tasks', col: 'progress',        def: 'INT DEFAULT 0' },
-    { table: 'tasks', col: 'revision_count',  def: 'INT DEFAULT 0' },
-    { table: 'tasks', col: 'feedback_notes',  def: 'TEXT' },
-    { table: 'tasks', col: 'completed_at',    def: 'DATETIME' },
-    { table: 'tasks', col: 'eta',             def: 'VARCHAR(255)' },
+  // ── Idempotent column additions (safe on pre-existing databases) ──────────
+  const alterCols = [
+    { table: 'tasks', col: 'progress',       def: 'INT DEFAULT 0' },
+    { table: 'tasks', col: 'revision_count', def: 'INT DEFAULT 0' },
+    { table: 'tasks', col: 'feedback_notes', def: 'TEXT'          },
+    { table: 'tasks', col: 'completed_at',   def: 'TIMESTAMPTZ'   },
+    { table: 'tasks', col: 'eta',            def: 'VARCHAR(255)'  },
   ];
-
-  for (const { table, col, def } of alterColumns) {
-    const [exists] = await conn.execute(
-      `SELECT COUNT(*) AS cnt FROM information_schema.columns
-       WHERE table_schema = ? AND table_name = ? AND column_name = ?`,
-      [dbName, table, col]
-    );
-    if (Number(exists[0].cnt) === 0) {
-      try { await conn.execute(`ALTER TABLE \`${table}\` ADD COLUMN \`${col}\` ${def}`); } catch (_) {}
-    }
+  for (const { table, col, def } of alterCols) {
+    await sqlFn(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${col} ${def}`);
   }
 
-  conn.release();
+  // ── Seed on first run ─────────────────────────────────────────────────────
+  const countRows = await sqlFn('SELECT COUNT(*) AS cnt FROM roles');
+  if (Number(countRows[0].cnt) === 0) await seedData(sqlFn);
 
-  // ── Seed on first run ──────────────────────────────────────────────────────
-  const [countRows] = await pool.execute('SELECT COUNT(*) AS cnt FROM roles');
-  if (Number(countRows[0].cnt) === 0) await seedData();
-
-  console.log('✅ Database ready (MySQL)');
+  _db = createDb(sqlFn);
+  console.log('✅ Database ready (Neon PostgreSQL)');
 }
 
 // ── Seed default data ────────────────────────────────────────────────────────
-async function seedData() {
+async function seedData(sqlFn) {
   const roleNames = ['Designer', 'Video Editor', 'Content Writer', 'Social Media Manager'];
   const roleIds   = {};
 
   for (const name of roleNames) {
-    const [res] = await pool.execute('INSERT INTO roles (name) VALUES (?)', [name]);
-    roleIds[name] = res.insertId;
+    const rows = await sqlFn('INSERT INTO roles (name) VALUES ($1) RETURNING id', [name]);
+    roleIds[name] = rows[0].id;
   }
 
   const taskTypes = [
-    { name: 'Graphic Design',     role: 'Designer',             capacity: 2 },
-    { name: 'Ad Creative',        role: 'Designer',             capacity: 2 },
-    { name: 'Story Design',       role: 'Designer',             capacity: 4 },
-    { name: 'Email Template',     role: 'Designer',             capacity: 2 },
-    { name: 'Reels',              role: 'Video Editor',         capacity: 4 },
-    { name: 'Video Editing',      role: 'Video Editor',         capacity: 2 },
-    { name: 'Content Writing',    role: 'Content Writer',       capacity: 4 },
-    { name: 'Blog Post',          role: 'Content Writer',       capacity: 2 },
-    { name: 'Caption Writing',    role: 'Content Writer',       capacity: 6 },
-    { name: 'Social Media Post',  role: 'Social Media Manager', capacity: 6 },
-    { name: 'Campaign Planning',  role: 'Social Media Manager', capacity: 2 },
+    { name: 'Graphic Design',    role: 'Designer',             capacity: 2 },
+    { name: 'Ad Creative',       role: 'Designer',             capacity: 2 },
+    { name: 'Story Design',      role: 'Designer',             capacity: 4 },
+    { name: 'Email Template',    role: 'Designer',             capacity: 2 },
+    { name: 'Reels',             role: 'Video Editor',         capacity: 4 },
+    { name: 'Video Editing',     role: 'Video Editor',         capacity: 2 },
+    { name: 'Content Writing',   role: 'Content Writer',       capacity: 4 },
+    { name: 'Blog Post',         role: 'Content Writer',       capacity: 2 },
+    { name: 'Caption Writing',   role: 'Content Writer',       capacity: 6 },
+    { name: 'Social Media Post', role: 'Social Media Manager', capacity: 6 },
+    { name: 'Campaign Planning', role: 'Social Media Manager', capacity: 2 },
   ];
 
   for (const tt of taskTypes) {
-    await pool.execute(
-      'INSERT INTO task_types (name, role_id, daily_capacity, is_predefined) VALUES (?, ?, ?, 1)',
+    await sqlFn(
+      'INSERT INTO task_types (name, role_id, daily_capacity, is_predefined) VALUES ($1, $2, $3, 1)',
       [tt.name, roleIds[tt.role], tt.capacity]
     );
   }
 
   const hashed = await bcrypt.hash('MMO@1993#', 10);
-  await pool.execute(
-    'INSERT INTO users (name, email, password, is_admin) VALUES (?, ?, ?, 1)',
+  await sqlFn(
+    'INSERT INTO users (name, email, password, is_admin) VALUES ($1, $2, $3, 1)',
     ['Admin', 'dhruv@monkmediaone.com', hashed]
   );
 
