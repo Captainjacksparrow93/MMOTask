@@ -85,13 +85,6 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-// ── Start HTTP server FIRST so the process stays alive ───────────────────────
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server listening on port ${PORT}`);
-  connectDb();
-});
-
 // ── Connect to DB with auto-retry ─────────────────────────────────────────────
 const { initDatabase } = require('./database/db');
 const RETRY_DELAY_MS   = 5000;
@@ -111,7 +104,23 @@ async function connectDb(attempt = 1) {
       console.log(`🔄 Retrying in ${RETRY_DELAY_MS / 1000}s… (${attempt}/${MAX_RETRIES})`);
       setTimeout(() => connectDb(attempt + 1), RETRY_DELAY_MS);
     } else {
-      console.error('💀 Could not connect after', MAX_RETRIES, 'attempts. Fix DB credentials in Hostinger hPanel.');
+      console.error('💀 Could not connect after', MAX_RETRIES, 'attempts. Fix DB credentials.');
     }
   }
 }
+
+// ── Start: listen directly (local/Docker) OR export for Vercel serverless ────
+const PORT = process.env.PORT || 3000;
+if (require.main === module) {
+  // Running via `node server.js` — local dev or Docker
+  app.listen(PORT, () => {
+    console.log(`🚀 Server listening on port ${PORT}`);
+    connectDb();
+  });
+} else {
+  // Imported as a module by Vercel serverless — initiate DB on first module load.
+  // The /api 503 guard handles requests that arrive before DB is ready.
+  connectDb();
+}
+
+module.exports = app;
