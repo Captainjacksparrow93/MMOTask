@@ -36,6 +36,7 @@ async function initDatabase() {
     database:           process.env.DB_NAME     || 'agency_tasks',
     waitForConnections: true,
     connectionLimit:    10,
+    connectTimeout:     10000,  // fail fast (10 s) — prevents hanging on unreachable hosts
     dateStrings:        true,   // return DATE/DATETIME as strings, not Date objects
   });
 

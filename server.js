@@ -104,7 +104,9 @@ async function connectDb(attempt = 1) {
       console.log(`🔄 Retrying in ${RETRY_DELAY_MS / 1000}s… (${attempt}/${MAX_RETRIES})`);
       setTimeout(() => connectDb(attempt + 1), RETRY_DELAY_MS);
     } else {
-      console.error('💀 Could not connect after', MAX_RETRIES, 'attempts. Fix DB credentials.');
+      console.error(`💀 Could not connect after ${MAX_RETRIES} quick attempts.`);
+      console.log('⏳ Will retry every 60 s — fix DB credentials or firewall and it will self-heal.');
+      setTimeout(() => connectDb(1), 60_000); // reset attempt counter, keep trying
     }
   }
 }
